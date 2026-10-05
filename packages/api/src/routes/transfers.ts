@@ -23,6 +23,14 @@ interface ChunkParams {
   index: string;
 }
 
+interface FinalizeParams {
+  fileId: string;
+}
+
+interface FinalizeBody {
+  totalChunksUploaded?: number;
+}
+
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== 'string' || !value.startsWith('Bearer ')) {
     return undefined;
@@ -135,4 +143,30 @@ export function registerTransferRoutes(
       replicationAcknowledged: 1,
     });
   });
+
+  app.post<{ Params: FinalizeParams; Body: FinalizeBody }>(
+    '/api/transfers/:fileId/finalize',
+    async (request, reply) => {
+      const transfer = database.getTransfer(request.params.fileId);
+      const token = bearerToken(request.headers.authorization);
+      const providedHash = token ? hashToken(token) : undefined;
+      if (!transfer || !providedHash || !tokensEqual(providedHash, transfer.upload_session_hash)) {
+        return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+      }
+
+      const uploadedCount = request.body?.totalChunksUploaded;
+      if (uploadedCount !== undefined && uploadedCount !== database.countStoredChunks(request.params.fileId)) {
+        return reply.code(400).send({ error: 'VALIDATION_ERROR' });
+      }
+      const finalized = database.finalizeTransfer(request.params.fileId);
+      if (!finalized) {
+        return reply.code(409).send({ error: 'UPLOAD_INCOMPLETE' });
+      }
+      return reply.code(200).send({
+        fileId: finalized.file_id,
+        status: finalized.status,
+        expiresAt: finalized.expires_at,
+      });
+    },
+  );
 }

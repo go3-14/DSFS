@@ -147,4 +147,47 @@ describe('POST /api/transfers', () => {
     expect(response.statusCode).toBe(404);
     expect(storage.writes).toHaveLength(0);
   });
+
+  it('finalizes only after every expected chunk is stored', async () => {
+    database = new MetadataDatabase();
+    const storage = new FakeStorageNodeClient();
+    app = buildApiServer(database, storage);
+    const init = await app.inject({
+      method: 'POST',
+      url: '/api/transfers',
+      payload: { authToken, totalSizeBytes: 5, chunkCount: 1, ttlSeconds: 600 },
+    });
+    const initialized = init.json();
+    const finalizeHeaders = { authorization: `Bearer ${initialized.uploadToken}` };
+
+    const incomplete = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/finalize`,
+      headers: finalizeHeaders,
+      payload: { totalChunksUploaded: 0 },
+    });
+    expect(incomplete.statusCode).toBe(409);
+
+    const content = Buffer.from('hello');
+    const checksum = createHash('sha256').update(content).digest('hex');
+    await app.inject({
+      method: 'PUT',
+      url: `/api/transfers/${initialized.fileId}/chunks/0`,
+      headers: {
+        ...finalizeHeaders,
+        'content-type': 'application/octet-stream',
+        'x-chunk-checksum-sha256': checksum,
+      },
+      payload: content,
+    });
+    const finalized = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/finalize`,
+      headers: finalizeHeaders,
+      payload: { totalChunksUploaded: 1 },
+    });
+
+    expect(finalized.statusCode).toBe(200);
+    expect(finalized.json()).toMatchObject({ fileId: initialized.fileId, status: 'READY' });
+  });
 });

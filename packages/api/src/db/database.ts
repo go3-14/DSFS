@@ -107,6 +107,18 @@ export class MetadataDatabase {
     ).pluck().get(fileId) as number;
   }
 
+  public finalizeTransfer(fileId: string): TransferRow | undefined {
+    const transfer = this.getTransfer(fileId);
+    if (!transfer || this.countStoredChunks(fileId) !== transfer.chunk_count) {
+      return undefined;
+    }
+    this.db.prepare(`
+      UPDATE transfers SET status = 'READY'
+      WHERE file_id = ? AND status IN ('CREATING', 'UPLOADING')
+    `).run(fileId);
+    return this.getTransfer(fileId);
+  }
+
   public close(): void {
     this.db.close();
   }
