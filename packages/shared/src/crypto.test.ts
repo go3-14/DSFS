@@ -4,7 +4,10 @@ import {
   decryptChunk,
   deriveKeys,
   encryptChunk,
+  decryptFilename,
+  encryptFilename,
   generateSecret,
+  sha256,
 } from './crypto.js';
 
 describe('secret generation and key derivation', () => {
@@ -101,5 +104,35 @@ describe('secret generation and key derivation', () => {
     const ciphertext = await encryptChunk(encKey, new Uint8Array([1, 2, 3]), aad);
 
     await expect(decryptChunk(wrongKey, ciphertext, aad)).rejects.toThrow();
+  });
+
+  it('computes a standard SHA-256 digest', async () => {
+    const digest = await sha256(new TextEncoder().encode('hello'));
+
+    expect(digest).toBe(
+      '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+    );
+  });
+
+  it('encrypts and decrypts a filename without returning plaintext', async () => {
+    const secret = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+    const encrypted = await encryptFilename('private-report.pdf', secret);
+
+    expect(encrypted).not.toContain('private-report.pdf');
+    await expect(decryptFilename(encrypted, secret)).resolves.toBe('private-report.pdf');
+  });
+
+  it('rejects a filename encrypted with another secret', async () => {
+    const encrypted = await encryptFilename(
+      'private-report.pdf',
+      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+    );
+
+    await expect(
+      decryptFilename(
+        encrypted,
+        '1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100',
+      ),
+    ).rejects.toThrow();
   });
 });

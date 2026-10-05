@@ -2,6 +2,7 @@ const SECRET_BYTES = 32;
 const CHUNK_IV_BYTES = 12;
 const CHUNK_TAG_BITS = 128;
 const HKDF_SALT = new Uint8Array(32);
+const FILENAME_IV = new Uint8Array(CHUNK_IV_BYTES);
 
 function getCrypto(): Crypto {
   if (!globalThis.crypto?.subtle) {
@@ -151,4 +152,66 @@ export async function decryptChunk(
     ciphertext as BufferSource,
   );
   return new Uint8Array(decrypted);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function deriveFilenameKey(secret: string): Promise<CryptoKey> {
+  const baseKey = await importSecret(secret);
+  return getCrypto().subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: HKDF_SALT,
+      info: new TextEncoder().encode('voidshare-filename'),
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+export async function sha256(buffer: Uint8Array): Promise<string> {
+  const digest = await getCrypto().subtle.digest('SHA-256', buffer as BufferSource);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+export async function encryptFilename(filename: string, secret: string): Promise<string> {
+  const key = await deriveFilenameKey(secret);
+  const encrypted = await getCrypto().subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: FILENAME_IV as BufferSource,
+      tagLength: CHUNK_TAG_BITS,
+    },
+    key,
+    new TextEncoder().encode(filename) as BufferSource,
+  );
+  return bytesToBase64(new Uint8Array(encrypted));
+}
+
+export async function decryptFilename(payload: string, secret: string): Promise<string> {
+  const key = await deriveFilenameKey(secret);
+  const decrypted = await getCrypto().subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: FILENAME_IV as BufferSource,
+      tagLength: CHUNK_TAG_BITS,
+    },
+    key,
+    base64ToBytes(payload) as BufferSource,
+  );
+  return new TextDecoder().decode(decrypted);
 }
