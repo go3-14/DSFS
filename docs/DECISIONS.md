@@ -64,3 +64,31 @@ This document records the foundational architectural and technical decisions est
 - **Context**: The existing repository contains functional frontend and backend work.
 - **Decision**: Inspect and preserve existing functional code, incrementally integrating distributed components around working modules rather than performing a disruptive rewrite.
 - **Consequences**: Minimizes regression risk and accelerates time to functional distributed integration.
+
+---
+
+## ADR-008: TypeScript Monorepo and Capability-Safe Ephemeral Transfer Contracts
+
+- **Status**: `Approved`
+- **Context**: The implementation is being built from the documentation-only repository in deliberate phases. The system needs a single language, a runnable local multi-node topology, client-only encryption, and explicit capability handling without exposing secrets.
+- **Decision**: Use TypeScript everywhere in an npm-workspaces monorepo containing `packages/api`, `packages/storage-node`, `packages/web`, and `packages/shared`. Use Fastify for the API and storage nodes, Vite + React for the web client, SQLite through `better-sqlite3` for metadata, and Vitest for tests. The API listens on port 8080, storage nodes use ports 9001–9003, and the web client uses port 5173. Development runs three storage-node processes through `concurrently`. Files are capped at 200 MB, TTL choices are 10 minutes, 1 hour, or 24 hours, chunks default to 4 MB, and replication is N=2 across three nodes.
+- **Consequences**: The first five phases produce a complete single-node E2EE transfer product. Later phases add placement, replication, failover, health monitoring, recovery, concurrency control, cleanup, and hardening without changing the language or database stack.
+
+### Security and lifecycle rules
+
+- The URL secret is 32 random bytes. HKDF-SHA256 derives `encKey` with info `voidshare-enc` and `authToken` with info `voidshare-auth`. The server never receives `encKey`.
+- The server stores `sha256(authToken)`, never the raw auth token. Every encrypted chunk uses AAD consisting of `fileId`, `chunkIndex` as u32, and `totalChunks` as u32.
+- Ciphertext chunks use a 12-byte IV and a 16-byte GCM tag, adding 28 bytes per chunk. The client initializes the transfer before encrypting because `fileId` is part of the AAD.
+- `download_lease_until` protects active downloads. An expired `DOWNLOADING` lease is eligible to become `READY` again. Sweeping also collects expired downloads, stale `CREATING`/`UPLOADING` rows older than 30 minutes, and rows stuck in `DELETING`.
+- Capability validation occurs before lifecycle-state errors: unknown IDs and invalid capabilities return generic `404`; a valid capability for a consumed or expired transfer returns `410`.
+
+### Session capabilities
+
+- Transfer initialization creates a separate high-entropy upload-session token. Only its hash is persisted. Upload, resumable-status, and finalize requests require the raw token.
+- Successful access atomically acquires the 60-second download lease, creates a high-entropy opaque download token, and persists only its hash and expiry. Chunk reads and completion require that token. Completion, deletion, or lease replacement invalidates it.
+- Resumable uploads are exposed through `GET /api/transfers/:fileId/status`, which returns acknowledged chunk indices after upload-session authorization.
+
+### Implementation governance
+
+- Phase N must pass its verification and required failure demonstration before Phase N+1 begins.
+- Each listed phase commit is made in order, each phase ends with a tag (`phase-N`, with Phase 13 also tagged `v1.0.0`), and the user is prompted before continuing to the next phase.
