@@ -20,6 +20,7 @@ async function sendNotFound(reply: FastifyReply): Promise<void> {
 export function buildServer(store: IStorageNode): FastifyInstance {
   const app = Fastify({
     bodyLimit: 220 * 1024 * 1024,
+    exposeHeadRoutes: false,
     logger: false,
   });
 
