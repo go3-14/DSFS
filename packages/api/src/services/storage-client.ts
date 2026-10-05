@@ -6,6 +6,11 @@ export interface StoredChunkResult {
   checksumSha256: string;
 }
 
+interface StorageNodePutResponse {
+  storedSizeBytes: number;
+  checksumVerified: boolean;
+}
+
 export interface StorageNodeClient {
   putChunk(
     chunkId: string,
@@ -41,7 +46,12 @@ export class HttpStorageNodeClient implements StorageNodeClient {
             return;
           }
           try {
-            resolve(JSON.parse(body) as StoredChunkResult);
+            const result = JSON.parse(body) as StorageNodePutResponse;
+            if (!Number.isInteger(result.storedSizeBytes) || !result.checksumVerified) {
+              reject(new Error('storage node rejected checksum or returned invalid size'));
+              return;
+            }
+            resolve({ sizeBytes: result.storedSizeBytes, checksumSha256 });
           } catch {
             reject(new Error('storage node returned invalid JSON'));
           }
