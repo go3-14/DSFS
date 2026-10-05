@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createFileId, createToken, hashToken } from '../services/tokens.js';
+import type { StoredChunkResult } from '../services/storage-client.js';
 
 export interface CreateTransferInput {
   authToken: string;
@@ -18,6 +19,17 @@ export interface CreatedTransfer {
   status: 'CREATING';
   expiresAt: string;
   uploadToken: string;
+}
+
+export interface TransferRow {
+  file_id: string;
+  capability_hash: string;
+  upload_session_hash: string;
+  total_size_bytes: number;
+  chunk_count: number;
+  chunk_size_bytes: number;
+  status: string;
+  expires_at: string;
 }
 
 const DEFAULT_SCHEMA_PATH = fileURLToPath(new URL('./schema.sql', import.meta.url));
@@ -63,6 +75,36 @@ export class MetadataDatabase {
     });
 
     return { fileId, status: 'CREATING', expiresAt, uploadToken };
+  }
+
+  public getTransfer(fileId: string): TransferRow | undefined {
+    return this.db.prepare('SELECT * FROM transfers WHERE file_id = ?').get(fileId) as TransferRow | undefined;
+  }
+
+  public recordStoredChunk(fileId: string, chunkIndex: number, result: StoredChunkResult): { chunkId: string } {
+    const chunkId = `${fileId}-${chunkIndex}`;
+    const transaction = this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO chunks (chunk_id, file_id, chunk_index, size_bytes, checksum_sha256, status)
+        VALUES (?, ?, ?, ?, ?, 'STORED')
+        ON CONFLICT(file_id, chunk_index) DO UPDATE SET
+          size_bytes = excluded.size_bytes,
+          checksum_sha256 = excluded.checksum_sha256,
+          status = 'STORED'
+      `).run(chunkId, fileId, chunkIndex, result.sizeBytes, result.checksumSha256);
+      this.db.prepare(`
+        UPDATE transfers SET status = 'UPLOADING'
+        WHERE file_id = ? AND status = 'CREATING'
+      `).run(fileId);
+    });
+    transaction();
+    return { chunkId };
+  }
+
+  public countStoredChunks(fileId: string): number {
+    return this.db.prepare(
+      "SELECT count(*) AS count FROM chunks WHERE file_id = ? AND status = 'STORED'",
+    ).pluck().get(fileId) as number;
   }
 
   public close(): void {
