@@ -1,4 +1,6 @@
 const SECRET_BYTES = 32;
+const CHUNK_IV_BYTES = 12;
+const CHUNK_TAG_BITS = 128;
 const HKDF_SALT = new Uint8Array(32);
 
 function getCrypto(): Crypto {
@@ -80,4 +82,73 @@ export async function deriveKeys(secret: string): Promise<{
   ]);
 
   return { encKey, authToken: new Uint8Array(authBits) };
+}
+
+export function createChunkAad(
+  fileId: string,
+  chunkIndex: number,
+  totalChunks: number,
+): Uint8Array {
+  if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex > 0xffffffff) {
+    throw new Error('chunkIndex must be an unsigned 32-bit integer');
+  }
+
+  if (!Number.isSafeInteger(totalChunks) || totalChunks < 1 || totalChunks > 0xffffffff) {
+    throw new Error('totalChunks must be an unsigned 32-bit integer');
+  }
+
+  const fileIdBytes = new TextEncoder().encode(fileId);
+  const aad = new Uint8Array(fileIdBytes.length + 8);
+  aad.set(fileIdBytes);
+  const view = new DataView(aad.buffer);
+  view.setUint32(fileIdBytes.length, chunkIndex);
+  view.setUint32(fileIdBytes.length + 4, totalChunks);
+  return aad;
+}
+
+export async function encryptChunk(
+  encKey: CryptoKey,
+  plaintext: Uint8Array,
+  aad: Uint8Array,
+): Promise<Uint8Array> {
+  const iv = new Uint8Array(CHUNK_IV_BYTES);
+  getCrypto().getRandomValues(iv);
+  const encrypted = await getCrypto().subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv as BufferSource,
+      additionalData: aad as BufferSource,
+      tagLength: CHUNK_TAG_BITS,
+    },
+    encKey,
+    plaintext as BufferSource,
+  );
+  const payload = new Uint8Array(CHUNK_IV_BYTES + encrypted.byteLength);
+  payload.set(iv);
+  payload.set(new Uint8Array(encrypted), CHUNK_IV_BYTES);
+  return payload;
+}
+
+export async function decryptChunk(
+  encKey: CryptoKey,
+  payload: Uint8Array,
+  aad: Uint8Array,
+): Promise<Uint8Array> {
+  if (payload.byteLength < CHUNK_IV_BYTES + CHUNK_TAG_BITS / 8) {
+    throw new Error('encrypted chunk is too short');
+  }
+
+  const iv = payload.slice(0, CHUNK_IV_BYTES);
+  const ciphertext = payload.slice(CHUNK_IV_BYTES);
+  const decrypted = await getCrypto().subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv as BufferSource,
+      additionalData: aad as BufferSource,
+      tagLength: CHUNK_TAG_BITS,
+    },
+    encKey,
+    ciphertext as BufferSource,
+  );
+  return new Uint8Array(decrypted);
 }
