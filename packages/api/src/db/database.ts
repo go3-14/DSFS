@@ -107,6 +107,12 @@ export class MetadataDatabase {
     ).pluck().get(fileId) as number;
   }
 
+  public getStoredChunkIndices(fileId: string): number[] {
+    return this.db.prepare(
+      "SELECT chunk_index FROM chunks WHERE file_id = ? AND status = 'STORED' ORDER BY chunk_index",
+    ).pluck().all(fileId) as number[];
+  }
+
   public finalizeTransfer(fileId: string): TransferRow | undefined {
     const transfer = this.getTransfer(fileId);
     if (!transfer || this.countStoredChunks(fileId) !== transfer.chunk_count) {

@@ -31,6 +31,10 @@ interface FinalizeBody {
   totalChunksUploaded?: number;
 }
 
+interface StatusParams {
+  fileId: string;
+}
+
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== 'string' || !value.startsWith('Bearer ')) {
     return undefined;
@@ -169,4 +173,28 @@ export function registerTransferRoutes(
       });
     },
   );
+
+  app.get<{ Params: StatusParams }>('/api/transfers/:fileId/status', async (request, reply) => {
+    const transfer = database.getTransfer(request.params.fileId);
+    const token = bearerToken(request.headers.authorization);
+    const providedHash = token ? hashToken(token) : undefined;
+    if (!transfer || !providedHash || !tokensEqual(providedHash, transfer.upload_session_hash)) {
+      return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+    }
+
+    const uploadedChunkIndices = database.getStoredChunkIndices(request.params.fileId);
+    const uploaded = new Set(uploadedChunkIndices);
+    const missingChunkIndices = Array.from(
+      { length: transfer.chunk_count },
+      (_, index) => index,
+    ).filter((index) => !uploaded.has(index));
+    return reply.code(200).send({
+      fileId: transfer.file_id,
+      status: transfer.status,
+      chunkCount: transfer.chunk_count,
+      uploadedChunkIndices,
+      missingChunkIndices,
+      expiresAt: transfer.expires_at,
+    });
+  });
 }

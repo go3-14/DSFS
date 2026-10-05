@@ -190,4 +190,49 @@ describe('POST /api/transfers', () => {
     expect(finalized.statusCode).toBe(200);
     expect(finalized.json()).toMatchObject({ fileId: initialized.fileId, status: 'READY' });
   });
+
+  it('reports uploaded and missing chunk indices for resumable uploads', async () => {
+    database = new MetadataDatabase();
+    const storage = new FakeStorageNodeClient();
+    app = buildApiServer(database, storage);
+    const init = await app.inject({
+      method: 'POST',
+      url: '/api/transfers',
+      payload: {
+        authToken,
+        totalSizeBytes: 8 * 1024 * 1024,
+        chunkCount: 2,
+        chunkSizeBytes: 4 * 1024 * 1024,
+        ttlSeconds: 600,
+      },
+    });
+    const initialized = init.json();
+    const content = Buffer.from('second chunk');
+    const checksum = createHash('sha256').update(content).digest('hex');
+    const headers = {
+      authorization: `Bearer ${initialized.uploadToken}`,
+      'content-type': 'application/octet-stream',
+      'x-chunk-checksum-sha256': checksum,
+    };
+    await app.inject({
+      method: 'PUT',
+      url: `/api/transfers/${initialized.fileId}/chunks/1`,
+      headers,
+      payload: content,
+    });
+
+    const status = await app.inject({
+      method: 'GET',
+      url: `/api/transfers/${initialized.fileId}/status`,
+      headers: { authorization: `Bearer ${initialized.uploadToken}` },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      fileId: initialized.fileId,
+      status: 'UPLOADING',
+      chunkCount: 2,
+      uploadedChunkIndices: [1],
+      missingChunkIndices: [0],
+    });
+  });
 });
