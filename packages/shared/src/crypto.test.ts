@@ -59,4 +59,47 @@ describe('secret generation and key derivation', () => {
     expect(ciphertext).toHaveLength(plaintext.length + 12 + 16);
     expect(decrypted).toEqual(plaintext);
   });
+
+  it('rejects a ciphertext byte that was tampered with', async () => {
+    const { encKey } = await deriveKeys(
+      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+    );
+    const aad = createChunkAad('file-123', 0, 1);
+    const ciphertext = await encryptChunk(
+      encKey,
+      new TextEncoder().encode('tamper me'),
+      aad,
+    );
+    ciphertext[ciphertext.length - 1] ^= 1;
+
+    await expect(decryptChunk(encKey, ciphertext, aad)).rejects.toThrow();
+  });
+
+  it('rejects a chunk decrypted with a different index AAD', async () => {
+    const { encKey } = await deriveKeys(
+      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+    );
+    const ciphertext = await encryptChunk(
+      encKey,
+      new TextEncoder().encode('ordered chunk'),
+      createChunkAad('file-123', 0, 2),
+    );
+
+    await expect(
+      decryptChunk(encKey, ciphertext, createChunkAad('file-123', 1, 2)),
+    ).rejects.toThrow();
+  });
+
+  it('rejects a ciphertext decrypted with a different key', async () => {
+    const { encKey } = await deriveKeys(
+      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+    );
+    const { encKey: wrongKey } = await deriveKeys(
+      '1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100',
+    );
+    const aad = createChunkAad('file-123', 0, 1);
+    const ciphertext = await encryptChunk(encKey, new Uint8Array([1, 2, 3]), aad);
+
+    await expect(decryptChunk(wrongKey, ciphertext, aad)).rejects.toThrow();
+  });
 });
