@@ -5,6 +5,10 @@ data/
 *.db-shm
 *.db-wal
 coverage/
+*.tmp
+*.log
+downloaded-*
+.DS_Store
 .env
 .env.*
 !.env.example
