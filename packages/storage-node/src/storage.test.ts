@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -60,5 +60,18 @@ describe('FilesystemChunkStore', () => {
     await expect(
       store.putChunk('chunk-1', Readable.from(['data']), 'not-a-checksum'),
     ).rejects.toThrow('invalid SHA-256 checksum');
+  });
+
+  it('removes the temporary file when checksum verification fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'voidshare-node-'));
+    temporaryDirectories.push(directory);
+    const store = new FilesystemChunkStore(directory, 'node-test');
+
+    await expect(
+      store.putChunk('chunk-1', Readable.from(['wrong bytes']), 'a'.repeat(64)),
+    ).rejects.toThrow('checksum mismatch');
+
+    expect(await readdir(directory)).toEqual([]);
+    expect(await store.hasChunk('chunk-1')).toBe(false);
   });
 });
