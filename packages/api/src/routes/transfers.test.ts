@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { MetadataDatabase } from '../db/database.js';
 import { buildApiServer } from '../server.js';
 import type { StorageNodeClient, StoredChunkResult } from '../services/storage-client.js';
@@ -28,10 +29,9 @@ class FakeStorageNodeClient implements StorageNodeClient {
     };
   }
 
-  public async getChunk(chunkId: string): Promise<NodeJS.ReadableStream> {
+  public async getChunk(chunkId: string): Promise<Readable> {
     const body = this.chunks.get(chunkId);
     if (!body) throw new Error('chunk not found');
-    const { Readable } = await import('node:stream');
     return Readable.from(body);
   }
 }

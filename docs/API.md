@@ -105,31 +105,25 @@ Binary octet-stream of the encrypted chunk payload (Ciphertext + IV + Auth Tag).
 ### 3.4 Authenticate & Access Transfer Manifest
 `POST /api/transfers/:fileId/access`
 
-#### Request Body
-```json
-{
-  "capabilityHash": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
-}
-```
+#### Headers
+- `Authorization`: `Bearer <hkdf-derived-auth-token>`
+- The API hashes this token for comparison and never receives the encryption key, plaintext, or URL fragment.
 
 #### Response (`200 OK`)
 ```json
 {
   "fileId": "void-9f8a-4b2c-81e0",
-  "status": "READY",
-  "totalSizeBytes": 15728640,
-  "chunkCount": 4,
-  "chunkSizeBytes": 4194304,
+  "status": "DOWNLOADING",
+  "downloadToken": "<opaque-64-hex-token>",
+  "downloadTokenExpiresAt": "2026-09-08T02:31:00Z",
   "encryptedFileName": "U2FsdGVkX1+vIbZ...",
-  "chunks": [
-    { "chunkIndex": 0, "sizeBytes": 4194304, "checksum": "e3b0c44298fc...", "downloadUrl": "/api/transfers/void-9f8a-4b2c-81e0/chunks/0" },
-    { "chunkIndex": 1, "sizeBytes": 4194304, "checksum": "f1d2d2f924e9...", "downloadUrl": "/api/transfers/void-9f8a-4b2c-81e0/chunks/1" },
-    { "chunkIndex": 2, "sizeBytes": 4194304, "checksum": "a6c9d07f3612...", "downloadUrl": "/api/transfers/void-9f8a-4b2c-81e0/chunks/2" },
-    { "chunkIndex": 3, "sizeBytes": 3145728, "checksum": "8b1a9953c461...", "downloadUrl": "/api/transfers/void-9f8a-4b2c-81e0/chunks/3" }
-  ],
-  "downloadAccessToken": "eyJhbGciOi..."
+  "manifest": [
+    { "chunkIndex": 0, "sizeBytes": 4194304, "checksumSha256": "e3b0c44298fc..." }
+  ]
 }
 ```
+
+The successful access atomically acquires a 60-second lease. Only the hash of the opaque `downloadToken` is stored; the raw token is returned once. If a lease has expired, the next authorized access replaces the stored token.
 
 #### Error Response (`404 Not Found` for nonexistent or invalid capability)
 ```json
@@ -145,7 +139,7 @@ Binary octet-stream of the encrypted chunk payload (Ciphertext + IV + Auth Tag).
 `GET /api/transfers/:fileId/chunks/:chunkIndex`
 
 #### Headers
-- `Authorization`: `Bearer <downloadAccessToken>`
+- `Authorization`: `Bearer <opaque-download-token>`
 
 #### Response (`200 OK`)
 - `Content-Type`: `application/octet-stream`
@@ -158,23 +152,23 @@ Binary octet-stream of the encrypted chunk payload (Ciphertext + IV + Auth Tag).
 `POST /api/transfers/:fileId/complete`
 
 #### Headers
-- `Authorization`: `Bearer <downloadAccessToken>`
+- `Authorization`: `Bearer <opaque-download-token>`
 
 #### Request Body
 ```json
-{
-  "chunksVerified": 4,
-  "clientDecryptionStatus": "SUCCESS"
-}
+{}
 ```
 
 #### Response (`200 OK`)
 ```json
 {
+  "fileId": "void-9f8a-4b2c-81e0",
   "status": "CONSUMED",
-  "message": "Transfer consumption recorded. Ephemeral deletion scheduled."
+  "downloadCount": 1
 }
 ```
+
+Completion clears the active download token and lease. The client must verify each ciphertext checksum and decrypt successfully before calling this endpoint.
 
 ---
 
