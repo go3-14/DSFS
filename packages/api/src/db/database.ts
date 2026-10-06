@@ -130,6 +130,34 @@ export class MetadataDatabase {
     return { chunkId };
   }
 
+  public recordPendingChunk(fileId: string, chunkIndex: number, result: StoredChunkResult): { chunkId: string } {
+    const chunkId = `${fileId}-${chunkIndex}`;
+    this.db.prepare(`
+      INSERT INTO chunks (chunk_id, file_id, chunk_index, size_bytes, checksum_sha256, status)
+      VALUES (?, ?, ?, ?, ?, 'PENDING')
+      ON CONFLICT(file_id, chunk_index) DO UPDATE SET
+        size_bytes = excluded.size_bytes,
+        checksum_sha256 = excluded.checksum_sha256,
+        status = 'PENDING'
+    `).run(chunkId, fileId, chunkIndex, result.sizeBytes, result.checksumSha256);
+    return { chunkId };
+  }
+
+  public markStoredChunk(fileId: string, chunkIndex: number, result: StoredChunkResult): { chunkId: string } {
+    const chunkId = `${fileId}-${chunkIndex}`;
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE chunks SET size_bytes = ?, checksum_sha256 = ?, status = 'STORED'
+        WHERE file_id = ? AND chunk_index = ?
+      `).run(result.sizeBytes, result.checksumSha256, fileId, chunkIndex);
+      this.db.prepare(`
+        UPDATE transfers SET status = 'UPLOADING'
+        WHERE file_id = ? AND status = 'CREATING'
+      `).run(fileId);
+    })();
+    return { chunkId };
+  }
+
   public countStoredChunks(fileId: string): number {
     return this.db.prepare(
       "SELECT count(*) AS count FROM chunks WHERE file_id = ? AND status = 'STORED'",
@@ -196,6 +224,25 @@ export class MetadataDatabase {
       SELECT node_id, placement_rank FROM chunk_placements
       WHERE chunk_id = ? ORDER BY placement_rank
     `).all(chunkId) as Array<{ node_id: string; placement_rank: number }>;
+  }
+
+  public recordConfirmedReplicas(chunkId: string, nodeIds: readonly string[]): void {
+    const transaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM chunk_replicas WHERE chunk_id = ?').run(chunkId);
+      const insert = this.db.prepare(`
+        INSERT INTO chunk_replicas (replica_id, chunk_id, node_id, status)
+        VALUES (?, ?, ?, 'ACTIVE')
+      `);
+      nodeIds.forEach((nodeId) => insert.run(createFileId(), chunkId, nodeId));
+    });
+    transaction();
+  }
+
+  public getConfirmedReplicas(chunkId: string): Array<{ node_id: string; status: string }> {
+    return this.db.prepare(`
+      SELECT node_id, status FROM chunk_replicas
+      WHERE chunk_id = ? ORDER BY rowid
+    `).all(chunkId) as Array<{ node_id: string; status: string }>;
   }
 
   public finalizeTransfer(fileId: string): TransferRow | undefined {
