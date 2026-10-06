@@ -56,3 +56,15 @@ CREATE TABLE IF NOT EXISTS chunk_replicas (
 
 CREATE INDEX IF NOT EXISTS idx_replicas_node_status
   ON chunk_replicas(node_id, status);
+
+CREATE TABLE IF NOT EXISTS chunk_placements (
+  chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL REFERENCES storage_nodes(node_id),
+  placement_rank INTEGER NOT NULL CHECK (placement_rank >= 0),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (chunk_id, node_id),
+  UNIQUE (chunk_id, placement_rank)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_placements_node
+  ON chunk_placements(node_id);

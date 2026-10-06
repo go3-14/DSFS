@@ -45,6 +45,16 @@ export interface DownloadLease {
   downloadTokenExpiresAt: string;
 }
 
+export interface StorageNodeRecord {
+  node_id: string;
+  endpoint_url: string;
+  status: string;
+  total_capacity_bytes: number;
+  used_capacity_bytes: number;
+  active_operations: number;
+  last_heartbeat: string;
+}
+
 const DEFAULT_SCHEMA_PATH = fileURLToPath(new URL('./schema.sql', import.meta.url));
 
 function hashesEqual(left: string, right: string): boolean {
@@ -130,6 +140,62 @@ export class MetadataDatabase {
     return this.db.prepare(
       "SELECT chunk_index FROM chunks WHERE file_id = ? AND status = 'STORED' ORDER BY chunk_index",
     ).pluck().all(fileId) as number[];
+  }
+
+  public registerStorageNode(input: {
+    nodeId: string;
+    endpointUrl: string;
+    status: string;
+    totalCapacityBytes?: number;
+    usedCapacityBytes?: number;
+    activeOperations?: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO storage_nodes (
+        node_id, endpoint_url, status, total_capacity_bytes,
+        used_capacity_bytes, active_operations, last_heartbeat
+      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(node_id) DO UPDATE SET
+        endpoint_url = excluded.endpoint_url,
+        status = excluded.status,
+        total_capacity_bytes = excluded.total_capacity_bytes,
+        used_capacity_bytes = excluded.used_capacity_bytes,
+        active_operations = excluded.active_operations,
+        last_heartbeat = excluded.last_heartbeat
+    `).run(
+      input.nodeId,
+      input.endpointUrl,
+      input.status,
+      input.totalCapacityBytes ?? 0,
+      input.usedCapacityBytes ?? 0,
+      input.activeOperations ?? 0,
+    );
+  }
+
+  public listStorageNodes(status?: string): StorageNodeRecord[] {
+    if (status === undefined) {
+      return this.db.prepare('SELECT * FROM storage_nodes ORDER BY node_id').all() as StorageNodeRecord[];
+    }
+    return this.db.prepare('SELECT * FROM storage_nodes WHERE status = ? ORDER BY node_id').all(status) as StorageNodeRecord[];
+  }
+
+  public recordPlacement(chunkId: string, nodeIds: readonly string[]): void {
+    const transaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM chunk_placements WHERE chunk_id = ?').run(chunkId);
+      const insert = this.db.prepare(`
+        INSERT INTO chunk_placements (chunk_id, node_id, placement_rank)
+        VALUES (?, ?, ?)
+      `);
+      nodeIds.forEach((nodeId, rank) => insert.run(chunkId, nodeId, rank));
+    });
+    transaction();
+  }
+
+  public getPlacement(chunkId: string): Array<{ node_id: string; placement_rank: number }> {
+    return this.db.prepare(`
+      SELECT node_id, placement_rank FROM chunk_placements
+      WHERE chunk_id = ? ORDER BY placement_rank
+    `).all(chunkId) as Array<{ node_id: string; placement_rank: number }>;
   }
 
   public finalizeTransfer(fileId: string): TransferRow | undefined {
