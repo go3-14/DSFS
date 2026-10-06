@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createFileId, createToken, hashToken } from '../services/tokens.js';
@@ -30,9 +31,27 @@ export interface TransferRow {
   chunk_size_bytes: number;
   status: string;
   expires_at: string;
+  download_token_hash: string | null;
+  download_token_expires_at: string | null;
+  download_lease_until: string | null;
+  download_count: number;
+  max_downloads: number;
+  original_name_encrypted: string | null;
+}
+
+export interface DownloadLease {
+  transfer: TransferRow;
+  downloadToken: string;
+  downloadTokenExpiresAt: string;
 }
 
 const DEFAULT_SCHEMA_PATH = fileURLToPath(new URL('./schema.sql', import.meta.url));
+
+function hashesEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, 'hex');
+  const rightBytes = Buffer.from(right, 'hex');
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
 
 export class MetadataDatabase {
   public readonly db: Database.Database;
@@ -123,6 +142,61 @@ export class MetadataDatabase {
       WHERE file_id = ? AND status IN ('CREATING', 'UPLOADING')
     `).run(fileId);
     return this.getTransfer(fileId);
+  }
+
+  public getStoredChunks(fileId: string): Array<{ chunk_index: number; size_bytes: number; checksum_sha256: string }> {
+    return this.db.prepare(`
+      SELECT chunk_index, size_bytes, checksum_sha256
+      FROM chunks WHERE file_id = ? AND status = 'STORED' ORDER BY chunk_index
+    `).all(fileId) as Array<{ chunk_index: number; size_bytes: number; checksum_sha256: string }>;
+  }
+
+  public acquireDownloadLease(
+    fileId: string,
+    capabilityHash: string,
+    now = new Date(),
+  ): DownloadLease | undefined {
+    const nowIso = now.toISOString();
+    const leaseUntil = new Date(now.getTime() + 60_000).toISOString();
+    const downloadToken = createToken();
+    const result = this.db.transaction(() => {
+      const transfer = this.getTransfer(fileId);
+      if (!transfer || !hashesEqual(capabilityHash, transfer.capability_hash) ||
+        transfer.expires_at <= nowIso || transfer.download_count >= transfer.max_downloads ||
+        (transfer.status !== 'READY' &&
+          !(transfer.status === 'DOWNLOADING' &&
+            !!transfer.download_lease_until && transfer.download_lease_until <= nowIso))) {
+        return undefined;
+      }
+      this.db.prepare(`
+        UPDATE transfers
+        SET status = 'DOWNLOADING', download_token_hash = ?,
+            download_token_expires_at = ?, download_lease_until = ?
+        WHERE file_id = ?
+      `).run(hashToken(downloadToken), leaseUntil, leaseUntil, fileId);
+      return { transfer: this.getTransfer(fileId)!, downloadToken, downloadTokenExpiresAt: leaseUntil };
+    })();
+    return result;
+  }
+
+  public completeDownload(fileId: string, tokenHash: string, now = new Date()): TransferRow | undefined {
+    const nowIso = now.toISOString();
+    return this.db.transaction(() => {
+      const transfer = this.getTransfer(fileId);
+      if (!transfer || transfer.status !== 'DOWNLOADING' ||
+        transfer.download_token_hash !== tokenHash ||
+        !transfer.download_lease_until || transfer.download_lease_until <= nowIso) {
+        return undefined;
+      }
+      const nextCount = transfer.download_count + 1;
+      this.db.prepare(`
+        UPDATE transfers
+        SET download_count = ?, status = ?, download_token_hash = NULL,
+            download_token_expires_at = NULL, download_lease_until = NULL
+        WHERE file_id = ? AND status = 'DOWNLOADING' AND download_token_hash = ?
+      `).run(nextCount, nextCount >= transfer.max_downloads ? 'CONSUMED' : 'READY', fileId, tokenHash);
+      return this.getTransfer(fileId);
+    })();
   }
 
   public close(): void {

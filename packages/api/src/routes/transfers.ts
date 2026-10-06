@@ -35,6 +35,9 @@ interface StatusParams {
   fileId: string;
 }
 
+interface AccessParams { fileId: string; }
+interface DownloadChunkParams { fileId: string; index: string; }
+
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== 'string' || !value.startsWith('Bearer ')) {
     return undefined;
@@ -195,6 +198,68 @@ export function registerTransferRoutes(
       uploadedChunkIndices,
       missingChunkIndices,
       expiresAt: transfer.expires_at,
+    });
+  });
+
+  app.post<{ Params: AccessParams }>('/api/transfers/:fileId/access', async (request, reply) => {
+    const token = bearerToken(request.headers.authorization);
+    const lease = token
+      ? database.acquireDownloadLease(request.params.fileId, hashToken(token))
+      : undefined;
+    if (!lease) {
+      return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+    }
+    return reply.code(200).send({
+      fileId: lease.transfer.file_id,
+      status: lease.transfer.status,
+      downloadToken: lease.downloadToken,
+      downloadTokenExpiresAt: lease.downloadTokenExpiresAt,
+      encryptedFileName: lease.transfer.original_name_encrypted,
+      manifest: database.getStoredChunks(request.params.fileId).map((chunk) => ({
+        chunkIndex: chunk.chunk_index,
+        sizeBytes: chunk.size_bytes,
+        checksumSha256: chunk.checksum_sha256,
+      })),
+    });
+  });
+
+  app.get<{ Params: DownloadChunkParams }>(
+    '/api/transfers/:fileId/chunks/:index',
+    async (request, reply) => {
+      const transfer = database.getTransfer(request.params.fileId);
+      const token = bearerToken(request.headers.authorization);
+      const providedHash = token ? hashToken(token) : undefined;
+      if (!transfer || !providedHash || !transfer.download_token_hash ||
+        !tokensEqual(providedHash, transfer.download_token_hash) ||
+        transfer.status !== 'DOWNLOADING' ||
+        !transfer.download_lease_until || transfer.download_lease_until <= new Date().toISOString()) {
+        return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+      }
+      const chunkIndex = Number(request.params.index);
+      if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= transfer.chunk_count) {
+        return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+      }
+      try {
+        const stream = await storageClient.getChunk(`${request.params.fileId}-${chunkIndex}`);
+        return reply.type('application/octet-stream').send(stream);
+      } catch {
+        return reply.code(502).send({ error: 'CHUNK_UNAVAILABLE' });
+      }
+    },
+  );
+
+  app.post<{ Params: AccessParams }>('/api/transfers/:fileId/complete', async (request, reply) => {
+    const token = bearerToken(request.headers.authorization);
+    const completed = token
+      ? database.completeDownload(request.params.fileId, hashToken(token))
+      : undefined;
+    if (!completed) {
+      return reply.code(404).send({ error: 'TRANSFER_NOT_FOUND' });
+    }
+    return reply.code(200).send({
+      fileId: completed.file_id,
+      status: completed.status,
+      downloadCount: completed.download_count,
     });
   });
 }

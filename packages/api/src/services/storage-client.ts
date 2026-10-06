@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import type { Readable } from 'node:stream';
 
 export interface StoredChunkResult {
   sizeBytes: number;
@@ -17,6 +18,7 @@ export interface StorageNodeClient {
     input: NodeJS.ReadableStream,
     checksumSha256: string,
   ): Promise<StoredChunkResult>;
+  getChunk(chunkId: string): Promise<Readable>;
 }
 
 export class HttpStorageNodeClient implements StorageNodeClient {
@@ -60,6 +62,24 @@ export class HttpStorageNodeClient implements StorageNodeClient {
       outgoing.on('error', reject);
       input.on('error', reject);
       input.pipe(outgoing);
+    });
+  }
+
+  public getChunk(chunkId: string): Promise<Readable> {
+    const target = new URL(`/chunks/${encodeURIComponent(chunkId)}`, this.endpoint);
+    const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
+    return new Promise((resolve, reject) => {
+      const outgoing = request(target, { method: 'GET' }, (response) => {
+        if ((response.statusCode ?? 500) >= 400) {
+          response.resume();
+          reject(new Error(`storage node returned ${response.statusCode}`));
+          return;
+        }
+        response.on('error', reject);
+        resolve(response);
+      });
+      outgoing.on('error', reject);
+      outgoing.end();
     });
   }
 }

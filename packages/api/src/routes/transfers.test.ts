@@ -8,6 +8,7 @@ const authToken = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1
 
 class FakeStorageNodeClient implements StorageNodeClient {
   public readonly writes: Array<{ chunkId: string; body: Buffer; checksumSha256: string }> = [];
+  public readonly chunks = new Map<string, Buffer>();
 
   public async putChunk(
     chunkId: string,
@@ -20,10 +21,18 @@ class FakeStorageNodeClient implements StorageNodeClient {
     }
     const body = Buffer.concat(chunks);
     this.writes.push({ chunkId, body, checksumSha256 });
+    this.chunks.set(chunkId, body);
     return {
       sizeBytes: body.byteLength,
       checksumSha256: createHash('sha256').update(body).digest('hex'),
     };
+  }
+
+  public async getChunk(chunkId: string): Promise<NodeJS.ReadableStream> {
+    const body = this.chunks.get(chunkId);
+    if (!body) throw new Error('chunk not found');
+    const { Readable } = await import('node:stream');
+    return Readable.from(body);
   }
 }
 
@@ -234,5 +243,93 @@ describe('POST /api/transfers', () => {
       uploadedChunkIndices: [1],
       missingChunkIndices: [0],
     });
+  });
+
+  it('authorizes access, returns an opaque lease token and manifest, streams chunks, and completes', async () => {
+    database = new MetadataDatabase();
+    const storage = new FakeStorageNodeClient();
+    app = buildApiServer(database, storage);
+    const init = await app.inject({
+      method: 'POST',
+      url: '/api/transfers',
+      payload: { authToken, totalSizeBytes: 5, chunkCount: 1, ttlSeconds: 600, maxDownloads: 1 },
+    });
+    const initialized = init.json();
+    const content = Buffer.from('hello');
+    const checksum = createHash('sha256').update(content).digest('hex');
+    await app.inject({
+      method: 'PUT',
+      url: `/api/transfers/${initialized.fileId}/chunks/0`,
+      headers: {
+        authorization: `Bearer ${initialized.uploadToken}`,
+        'content-type': 'application/octet-stream',
+        'x-chunk-checksum-sha256': checksum,
+      },
+      payload: content,
+    });
+    await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/finalize`,
+      headers: { authorization: `Bearer ${initialized.uploadToken}` },
+      payload: { totalChunksUploaded: 1 },
+    });
+
+    const access = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/access`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(access.statusCode).toBe(200);
+    const accessBody = access.json();
+    expect(accessBody.downloadToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(accessBody.downloadToken).not.toBe(authToken);
+    expect(accessBody.manifest).toEqual([{ chunkIndex: 0, sizeBytes: 5, checksumSha256: checksum }]);
+
+    const chunk = await app.inject({
+      method: 'GET',
+      url: `/api/transfers/${initialized.fileId}/chunks/0`,
+      headers: { authorization: `Bearer ${accessBody.downloadToken}` },
+    });
+    expect(chunk.statusCode).toBe(200);
+    expect(chunk.rawPayload).toEqual(content);
+
+    const complete = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/complete`,
+      headers: { authorization: `Bearer ${accessBody.downloadToken}` },
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json()).toMatchObject({ status: 'CONSUMED', downloadCount: 1 });
+
+    const replay = await app.inject({
+      method: 'GET',
+      url: `/api/transfers/${initialized.fileId}/chunks/0`,
+      headers: { authorization: `Bearer ${accessBody.downloadToken}` },
+    });
+    expect(replay.statusCode).toBe(404);
+  });
+
+  it('returns byte-identical errors for an invalid capability and an unknown transfer', async () => {
+    database = new MetadataDatabase();
+    app = buildApiServer(database, new FakeStorageNodeClient());
+    const init = await app.inject({
+      method: 'POST',
+      url: '/api/transfers',
+      payload: { authToken, totalSizeBytes: 5, chunkCount: 1, ttlSeconds: 600 },
+    });
+    const initialized = init.json();
+    const invalid = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${initialized.fileId}/access`,
+      headers: { authorization: `Bearer ${'11'.repeat(32)}` },
+    });
+    const unknown = await app.inject({
+      method: 'POST',
+      url: `/api/transfers/${'22'.repeat(16)}/access`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(invalid.statusCode).toBe(404);
+    expect(unknown.statusCode).toBe(404);
+    expect(invalid.body).toBe(unknown.body);
   });
 });
