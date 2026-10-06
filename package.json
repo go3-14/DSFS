@@ -7,7 +7,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev:nodes": "node scripts/run-storage-nodes.mjs"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
