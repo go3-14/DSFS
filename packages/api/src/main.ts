@@ -2,11 +2,26 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { MetadataDatabase } from './db/database.js';
 import { buildApiServer } from './server.js';
+import { PlacementService } from './placement/service.js';
+import { ReplicationService } from './replication/replication.js';
+import { HttpStorageNodeClient } from './services/storage-client.js';
 
 const databasePath = process.env.DB_PATH ?? './data/api.db';
 await mkdir(dirname(databasePath), { recursive: true });
 const database = new MetadataDatabase(databasePath);
-const app = buildApiServer(database);
+const nodeDefinitions = (process.env.STORAGE_NODES ?? 'node-1=http://localhost:9001,node-2=http://localhost:9002,node-3=http://localhost:9003')
+  .split(',')
+  .map((entry) => entry.split('='))
+  .filter(([nodeId, endpoint]) => !!nodeId && !!endpoint);
+for (const [nodeId, endpoint] of nodeDefinitions) {
+  database.registerStorageNode({ nodeId, endpointUrl: endpoint, status: 'HEALTHY' });
+}
+const replicator = new ReplicationService(
+  database,
+  new PlacementService(database),
+  nodeDefinitions.map(([nodeId, endpoint]) => ({ nodeId, client: new HttpStorageNodeClient(endpoint) })),
+);
+const app = buildApiServer(database, new HttpStorageNodeClient(nodeDefinitions[0]?.[1] ?? 'http://localhost:9001'), replicator);
 
 try {
   await app.listen({

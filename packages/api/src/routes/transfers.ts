@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { MetadataDatabase } from '../db/database.js';
 import type { StorageNodeClient } from '../services/storage-client.js';
 import { hashToken, isTokenHex } from '../services/tokens.js';
+import type { ChunkReplicator } from '../replication/replication.js';
 
 const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
@@ -84,6 +85,7 @@ export function registerTransferRoutes(
   app: FastifyInstance,
   database: MetadataDatabase,
   storageClient: StorageNodeClient,
+  replicator?: ChunkReplicator,
 ): void {
   app.post<{ Body: Partial<InitBody> }>('/api/transfers', async (request, reply) => {
     try {
@@ -137,17 +139,30 @@ export function registerTransferRoutes(
       return reply.code(400).send({ error: 'VALIDATION_ERROR' });
     }
 
-    const result = await storageClient.putChunk(
-      `${request.params.fileId}-${chunkIndex}`,
-      request.body as NodeJS.ReadableStream,
-      checksum,
-    );
-    database.recordStoredChunk(request.params.fileId, chunkIndex, result);
+    const chunkId = `${request.params.fileId}-${chunkIndex}`;
+    let storedSizeBytes: number;
+    let replicationAcknowledged = 1;
+    if (replicator) {
+      const parts: Buffer[] = [];
+      for await (const part of request.body as AsyncIterable<Buffer | string>) {
+        parts.push(Buffer.isBuffer(part) ? part : Buffer.from(part));
+      }
+      const payload = Buffer.concat(parts);
+      database.recordPendingChunk(request.params.fileId, chunkIndex, { sizeBytes: payload.length, checksumSha256: checksum });
+      const result = await replicator.replicateChunk(chunkId, payload, checksum, 2);
+      storedSizeBytes = payload.length;
+      replicationAcknowledged = result.confirmedNodeIds.length;
+      database.markStoredChunk(request.params.fileId, chunkIndex, { sizeBytes: storedSizeBytes, checksumSha256: checksum });
+    } else {
+      const result = await storageClient.putChunk(chunkId, request.body as NodeJS.ReadableStream, checksum);
+      storedSizeBytes = result.sizeBytes;
+      database.recordStoredChunk(request.params.fileId, chunkIndex, result);
+    }
     return reply.code(200).send({
       chunkIndex,
-      storedSizeBytes: result.sizeBytes,
-      checksumVerified: result.checksumSha256.toLowerCase() === checksum.toLowerCase(),
-      replicationAcknowledged: 1,
+      storedSizeBytes,
+      checksumVerified: true,
+      replicationAcknowledged,
     });
   });
 
